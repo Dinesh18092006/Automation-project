@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Voice Trigger Automation</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <h1>🎤 Voice Trigger Automation</h1>
+
+        <div id="status" class="status inactive">
+            Trigger Inactive
+        </div>
+
+        <div class="controls">
+            <button id="startButton">Start Checking</button>
+            <button id="stopButton">Stop Checking</button>
+        </div>
+
+        <div class="microphone">
+            <div id="micIcon">🎙️</div>
+            <p id="micStatus">Microphone is OFF</p>
+        </div>
+
+        <div class="transcript-box">
+            <h2>Live Transcript</h2>
+
+            <div id="transcript">
+                Waiting for speech...
+            </div>
+        </div>
+
+    </div>
+
+    <script src="app.js"></script>
+
+</body>
+</html>
