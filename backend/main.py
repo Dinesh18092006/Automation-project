@@ -1,13 +1,22 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta, timezone
 
 app = FastAPI(title="Voice Trigger API")
-
+app = FastAPI(title="Voice Trigger API")
 
 # -----------------------------
 # Trigger state
 # -----------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 trigger = {
     "active": False,
@@ -127,3 +136,4 @@ def receive_transcript(data: TranscriptRequest):
         "trigger_id": data.trigger_id,
         "accepted": True,
     }
+
