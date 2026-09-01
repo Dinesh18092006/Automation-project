@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timedelta, timezone
 
 app = FastAPI(title="Voice Trigger API")
-app = FastAPI(title="Voice Trigger API")
+
 
 # -----------------------------
 # Trigger state
