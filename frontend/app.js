@@ -1215,18 +1215,74 @@ async function resetBackendState() {
 // --------------------------------------------------------------------------
 // Auth & Config Modals
 // --------------------------------------------------------------------------
+let hasAutoTriggeredForUser = false;
+
+async function autoStartSessionOnLogin(user, durationSeconds = 60) {
+  if (!user) return;
+  console.log(`[Auto-Trigger] User authenticated: ${user.email}. Automatically initiating timer session (${durationSeconds}s)...`);
+
+  if (!isMonitoring) {
+    startMonitoring();
+  }
+
+  // If already in an active session, do not re-trigger
+  if (sessionState === "ACTIVE") {
+    console.log("[Auto-Trigger] Voice session is already ACTIVE; timer running.");
+    return;
+  }
+
+  const userPrefix = (user.email ? user.email.split("@")[0] : "user").replace(/[^a-zA-Z0-9_]/g, "");
+  const triggerId = `USER_${userPrefix.toUpperCase()}_${Date.now().toString().slice(-4)}`;
+
+  try {
+    const res = await fetch(`${currentApiUrl}/trigger/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        trigger_id: triggerId,
+        duration_seconds: durationSeconds,
+      }),
+    });
+
+    if (res.ok) {
+      updateEventTime(`Auto-started session for ${user.email.split("@")[0]}`);
+      pollBackendStatus();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      console.warn("[Auto-Trigger] Could not start session:", err);
+    }
+  } catch (err) {
+    console.warn("[Auto-Trigger] Start trigger error:", err);
+  }
+}
+
 function initSupabase() {
   if (!window.supabase) return;
   try {
     supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
     supabaseClient.auth.onAuthStateChange((event, session) => {
+      const prevUser = activeAuthUser;
       activeAuthUser = session ? session.user : null;
       if (activeAuthUser) {
         if (authBtnLabel) authBtnLabel.textContent = activeAuthUser.email.split("@")[0];
         if (signOutBtn) signOutBtn.classList.remove("hidden");
+
+        // Automatically start the voice session & timer when user logs in
+        if (event === "SIGNED_IN" || (!prevUser && (event === "INITIAL_SESSION" || !hasAutoTriggeredForUser))) {
+          hasAutoTriggeredForUser = true;
+          setTimeout(() => {
+            if (activeAuthUser && sessionState !== "ACTIVE") {
+              autoStartSessionOnLogin(activeAuthUser, 60);
+            }
+          }, 600);
+        }
       } else {
+        hasAutoTriggeredForUser = false;
         if (authBtnLabel) authBtnLabel.textContent = "Sign In";
         if (signOutBtn) signOutBtn.classList.add("hidden");
+        if (event === "SIGNED_OUT") {
+          resetBackendState();
+        }
       }
     });
 
@@ -1235,6 +1291,16 @@ function initSupabase() {
         activeAuthUser = data.session.user;
         if (authBtnLabel) authBtnLabel.textContent = activeAuthUser.email.split("@")[0];
         if (signOutBtn) signOutBtn.classList.remove("hidden");
+
+        // Restore and auto-start timer for authenticated user
+        if (!hasAutoTriggeredForUser) {
+          hasAutoTriggeredForUser = true;
+          setTimeout(() => {
+            if (activeAuthUser && sessionState !== "ACTIVE") {
+              autoStartSessionOnLogin(activeAuthUser, 60);
+            }
+          }, 800);
+        }
       }
     });
   } catch (_) {}
@@ -1337,7 +1403,9 @@ function setupEventListeners() {
   // Modals
   if (authBtn) authBtn.addEventListener("click", () => showAuthModal("signin"));
   if (signOutBtn) signOutBtn.addEventListener("click", () => {
+    hasAutoTriggeredForUser = false;
     if (supabaseClient) supabaseClient.auth.signOut();
+    resetBackendState();
   });
   if (closeAuthModalBtn) closeAuthModalBtn.addEventListener("click", hideAuthModal);
   if (tabSignIn) tabSignIn.addEventListener("click", () => showAuthModal("signin"));
@@ -1353,15 +1421,24 @@ function setupEventListeners() {
 
       try {
         if (tabSignUp.classList.contains("active")) {
-          const { error } = await supabaseClient.auth.signUp({ email, password });
+          const { data, error } = await supabaseClient.auth.signUp({ email, password });
           if (error) throw error;
           authModalAlert.className = "modal-alert success";
           authModalAlert.textContent = "Account created successfully!";
+          if (data && data.user) {
+            hasAutoTriggeredForUser = true;
+            autoStartSessionOnLogin(data.user, 60);
+          }
+          setTimeout(hideAuthModal, 800);
         } else {
-          const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+          const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
           if (error) throw error;
           authModalAlert.className = "modal-alert success";
-          authModalAlert.textContent = "Signed in successfully!";
+          authModalAlert.textContent = "Signed in successfully! Starting voice session timer...";
+          if (data && data.user) {
+            hasAutoTriggeredForUser = true;
+            autoStartSessionOnLogin(data.user, 60);
+          }
           setTimeout(hideAuthModal, 800);
         }
       } catch (err) {
@@ -1472,6 +1549,13 @@ window.addEventListener("DOMContentLoaded", () => {
   } else if (hostname === "127.0.0.1") {
     currentApiUrl = "http://127.0.0.1:8000";
     if (apiUrlSelect) apiUrlSelect.value = "http://127.0.0.1:8000";
+  } else {
+    currentApiUrl = window.location.origin;
+    if (apiUrlSelect) {
+      if (Array.from(apiUrlSelect.options).some(o => o.value === currentApiUrl)) {
+        apiUrlSelect.value = currentApiUrl;
+      }
+    }
   }
 
   setupEventListeners();
@@ -1481,6 +1565,6 @@ window.addEventListener("DOMContentLoaded", () => {
   loadTranscriptHistory();
 
   // AUTOMATIC TRIGGER LIFECYCLE:
-  // On page load, the app automatically connects to the backend and starts monitoring!
+  // Connect to backend and start monitoring stream
   startMonitoring();
 });
