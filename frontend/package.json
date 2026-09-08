@@ -1,0 +1,12 @@
+{
+  "name": "voice-trigger-frontend",
+  "version": "1.0.0",
+  "description": "Voice Trigger Automation Frontend Dashboard",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "keywords": ["voice-trigger", "automation", "speech-recognition"],
+  "author": "",
+  "license": "ISC"
+}

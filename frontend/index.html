@@ -1,45 +1,350 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <title>Voice Trigger Automation</title>
-
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Trigger Automation — SNS Agent Workbench</title>
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+  <!-- Dynamic Environment Variables -->
+  <script src="/env.js"></script>
+  <!-- Supabase JS Client v2 (for background auth & persistence) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 
 <body>
+  <div class="app-container">
+    <!-- 1. HEADER ROW -->
+    <header class="dashboard-header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+            <line x1="12" y1="19" x2="12" y2="22"></line>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Voice Trigger Automation</h1>
+          <p class="subtitle">SNS Agent Workbench &bull; Scheduled Speech-to-Text Pipeline</p>
+        </div>
+      </div>
 
-    <div class="container">
-
-        <h1>🎤 Voice Trigger Automation</h1>
-
-        <div id="status" class="status inactive">
-            Trigger Inactive
+      <!-- Header Controls: Unified Right-Aligned Flex Row with gap-3 -->
+      <div class="header-right">
+        <!-- Target Backend Dropdown -->
+        <div class="backend-selector">
+          <label for="apiUrlSelect" class="selector-label">Target Backend:</label>
+          <div class="url-input-group">
+            <select id="apiUrlSelect" class="api-select">
+              <option value="http://localhost:8000" selected>Local (localhost:8000)</option>
+              <option value="http://127.0.0.1:8000">Local (127.0.0.1:8000)</option>
+              <option value="https://api.agents.snsihub.ai">SNS Memora (Production)</option>
+              <option value="https://automation-project-d95s.onrender.com">Cloud (Render)</option>
+              <option value="custom">Custom URL...</option>
+            </select>
+            <input type="text" id="customApiUrl" class="custom-url-input hidden"
+              placeholder="https://your-backend.com" />
+          </div>
         </div>
 
-        <div class="controls">
-            <button id="startButton">Start Checking</button>
-            <button id="stopButton">Stop Checking</button>
-        </div>
+        <!-- Single State-Aware Monitoring Toggle Button -->
+        <button id="monitoringToggleBtn" class="btn btn-toggle-monitoring active" type="button" title="Toggle Monitoring">
+          <span class="toggle-dot"></span>
+          <span id="monitoringToggleLabel">Monitoring Active</span>
+        </button>
 
-        <div class="microphone">
-            <div id="micIcon">🎙️</div>
-            <p id="micStatus">Microphone is OFF</p>
-        </div>
+        <!-- Header Actions: Sign In, Sign Out, Config -->
+        <button id="authBtn" class="btn btn-ghost btn-sm" title="Sign In">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+          <span id="authBtnLabel">Sign In</span>
+        </button>
+        <button id="signOutBtn" class="btn btn-ghost btn-sm hidden" title="Sign out">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+            <polyline points="16 17 21 12 16 7"></polyline>
+            <line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+          <span>Sign Out</span>
+        </button>
+        <button id="configModalBtn" class="btn btn-ghost btn-sm" title="Configuration">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <span>Config</span>
+        </button>
+      </div>
+    </header>
 
-        <div class="transcript-box">
-            <h2>Live Transcript</h2>
-
-            <div id="transcript">
-                Waiting for speech...
-            </div>
-        </div>
-
+    <!-- 2. STATUS BANNER -->
+    <div id="monitoringBanner" class="status-banner banner-active">
+      <div class="banner-left">
+        <span class="status-pulse-dot"></span>
+        <span id="monitoringBannerText">Monitoring Active &bull; Auto-polling &amp; WebSocket stream live</span>
+      </div>
+      <div class="banner-right">
+        <span id="micPermissionStatus" class="chip chip-neutral">Mic: Checking Permission...</span>
+        <span id="lastEventTime" class="timestamp-chip">Initialized</span>
+      </div>
     </div>
 
-    <script src="app.js"></script>
+    <!-- 3. THREE STATUS CARDS ROW (CSS Grid grid-cols-3) -->
+    <div class="dashboard-cards-grid">
+      <!-- Card 1: Backend Connection -->
+      <section class="card card-status">
+        <div class="card-header">
+          <div class="card-title-group">
+            <div class="card-icon icon-cyan">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect width="20" height="8" x="2" y="2" rx="2" ry="2"></rect>
+                <rect width="20" height="8" x="2" y="14" rx="2" ry="2"></rect>
+                <line x1="6" x2="6.01" y1="6" y2="6"></line>
+                <line x1="6" x2="6.01" y1="18" y2="18"></line>
+              </svg>
+            </div>
+            <h2>Backend Connection</h2>
+          </div>
+          <div id="backendStatusPill" class="status-pill status-connected">
+            <span class="pill-dot"></span>
+            <span id="backendStatusLabel">Online</span>
+          </div>
+        </div>
+        <div class="card-body card-body-centered">
+          <div class="endpoint-box">
+            <span class="box-tag">ENDPOINT</span>
+            <code id="backendEndpointBox">GET /trigger/status</code>
+          </div>
+        </div>
+      </section>
 
+      <!-- Card 2: Session Status -->
+      <section class="card card-status">
+        <div class="card-header">
+          <div class="card-title-group">
+            <div class="card-icon icon-blue">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+            </div>
+            <h2>Session Status</h2>
+          </div>
+          <div id="sessionStatusBadge" class="status-badge badge-idle">IDLE</div>
+        </div>
+        <div class="card-body card-body-centered">
+          <div class="session-state-container">
+            <div id="triggerStatePill" class="status-pill status-neutral">
+              <span class="pill-dot"></span>
+              <span id="triggerStateLabel">Trigger Inactive</span>
+            </div>
+            <p class="card-description">Listens for external <code>POST /trigger/start</code> activation.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 3: Active Session & Timer -->
+      <section class="card card-status">
+        <div class="card-header">
+          <div class="card-title-group">
+            <div class="card-icon icon-emerald">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+              </svg>
+            </div>
+            <h2>Active Session &amp; Timer</h2>
+          </div>
+        </div>
+        <div class="card-body card-body-centered">
+          <div class="timer-display-box">
+            <div id="countdownDisplay" class="countdown-digits">00:00</div>
+          </div>
+          <div id="noActiveSessionPlaceholder" class="session-placeholder">
+            <span>No active trigger session</span>
+          </div>
+          <div id="activeSessionDetails" class="session-details-box hidden">
+            <div class="detail-line">
+              <span class="detail-label">Session ID:</span>
+              <code id="activeSessionId">-</code>
+            </div>
+            <div class="detail-line">
+              <span class="detail-label">Expires:</span>
+              <span id="activeSessionExpires">-</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 4. LIVE TRANSCRIPT PANEL (Full Width, Bottom) -->
+    <section class="card transcript-panel">
+      <div class="card-header transcript-header">
+        <div class="card-title-group">
+          <div class="card-icon icon-cyan">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+              <polyline points="14 2 14 8 20 8"></polyline>
+              <line x1="16" y1="13" x2="8" y2="13"></line>
+              <line x1="16" y1="17" x2="8" y2="17"></line>
+              <polyline points="10 9 9 9 8 9"></polyline>
+            </svg>
+          </div>
+          <h2>Live Speech-to-Text Transcript</h2>
+        </div>
+        <div class="transcript-header-actions">
+          <span id="audioUploadStatus" class="audio-upload-status hidden">
+            <span class="upload-spinner"></span>
+            <span id="audioUploadText">Uploading 0%</span>
+          </span>
+          <input type="file" id="audioFileInput" accept="audio/*,.mp3,.wav,.m4a,.webm,.ogg" style="display: none;" />
+          <button id="uploadAudioBtn" class="btn btn-ghost btn-sm" type="button" title="Upload audio file (MP3, WAV, M4A, WebM, OGG)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <span>Upload Audio</span>
+          </button>
+          <span id="wordCountBadge" class="word-count-badge">0 words</span>
+          <button id="copyTranscriptBtn" class="btn btn-ghost btn-sm" type="button" title="Copy transcript">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
+              <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
+            </svg>
+            <span>Copy</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="card-body transcript-body">
+        <div id="transcriptBox" class="transcript-display-area">
+          <div id="transcriptPlaceholder" class="transcript-placeholder">Waiting for voice session to begin...</div>
+          <span id="transcriptFinal" class="transcript-final"></span>
+          <span id="transcriptInterim" class="transcript-interim"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. TRANSCRIPT HISTORY PANEL (Task 4: Last 20 Transcripts from Supabase) -->
+    <section class="card history-panel">
+      <div class="card-header history-header" id="historyHeaderToggle" style="cursor: pointer;">
+        <div class="card-title-group">
+          <div class="card-icon icon-blue">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 14 14"></polyline>
+            </svg>
+          </div>
+          <h2>Transcript History</h2>
+          <span id="historyCountBadge" class="word-count-badge">0 saved</span>
+        </div>
+        <div class="history-header-actions">
+          <button id="refreshHistoryBtn" class="btn btn-ghost btn-sm" type="button" title="Refresh History">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+            <span>Refresh</span>
+          </button>
+          <button id="toggleHistoryBtn" class="btn btn-ghost btn-sm" type="button" title="Toggle History Panel">
+            <span id="toggleHistoryIcon">&#9660;</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="card-body history-body" id="historyBody">
+        <div id="historyLoading" class="history-placeholder">Loading transcript history...</div>
+        <div id="historyEmpty" class="history-placeholder hidden">No speech transcripts stored yet. Complete a voice session to see records here.</div>
+        <div id="historyList" class="history-list hidden"></div>
+      </div>
+    </section>
+
+    <!-- 6. Simulation Bar (Discreet developer trigger testing) -->
+    <div class="simulation-bar">
+      <span class="sim-label">Simulate Trigger:</span>
+      <div class="sim-buttons">
+        <button id="test10sBtn" class="btn-sim" type="button">10s Test</button>
+        <button id="test30sBtn" class="btn-sim" type="button">30s Test</button>
+        <button id="test1mBtn" class="btn-sim" type="button">1m Test</button>
+        <button id="testResetBtn" class="btn-sim btn-sim-reset" type="button">Reset State</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Authentication Modal -->
+  <div id="authModal" class="modal-backdrop hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-icon">🔐</span>
+          <h3>Authentication</h3>
+        </div>
+        <button id="closeAuthModalBtn" class="btn-modal-close" type="button">&times;</button>
+      </div>
+      <div class="modal-tabs">
+        <button id="tabSignIn" class="modal-tab active" type="button">Sign In</button>
+        <button id="tabSignUp" class="modal-tab" type="button">Create Account</button>
+      </div>
+      <form id="authForm" class="modal-body">
+        <div id="authModalAlert" class="modal-alert hidden"></div>
+        <div class="form-group">
+          <label for="authEmail">Email Address</label>
+          <input type="email" id="authEmail" class="form-input" placeholder="you@company.com" required />
+        </div>
+        <div class="form-group">
+          <label for="authPassword">Password</label>
+          <input type="password" id="authPassword" class="form-input" placeholder="••••••••" required minlength="6" />
+        </div>
+        <button type="submit" id="authSubmitBtn" class="btn btn-primary modal-submit-btn">Sign In</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Configuration Modal -->
+  <div id="configModal" class="modal-backdrop hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="modal-icon">⚙️</span>
+          <h3>Pipeline Configuration</h3>
+        </div>
+        <button id="closeConfigModalBtn" class="btn-modal-close" type="button">&times;</button>
+      </div>
+      <form id="configForm" class="modal-body">
+        <div id="configModalAlert" class="modal-alert hidden"></div>
+        <p class="modal-desc">Configure the Speech-to-Text STT Webhook endpoint and backend URL. Defaults are loaded from <code>.env</code>.</p>
+        <div class="form-group">
+          <label for="cfgWebhookUrl">STT Webhook / Pipeline Endpoint (POST)</label>
+          <input type="url" id="cfgWebhookUrl" class="form-input" placeholder="https://api.agents.snsihub.ai/webhook/memora-chat" />
+          <span class="form-help">Receives audio stream / transcript dispatch upon session triggers</span>
+        </div>
+        <div class="form-group">
+          <label for="cfgSupabaseUrl">Backend Data Store URL</label>
+          <input type="url" id="cfgSupabaseUrl" class="form-input" placeholder="https://your-project.supabase.co" />
+        </div>
+        <div class="form-group">
+          <label for="cfgSupabaseKey">Public API Key</label>
+          <input type="password" id="cfgSupabaseKey" class="form-input" placeholder="eyJhbGciOi..." />
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="resetConfigBtn" class="btn btn-ghost btn-sm">Reset Defaults</button>
+          <button type="submit" id="saveConfigBtn" class="btn btn-primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
 </body>
+
 </html>
