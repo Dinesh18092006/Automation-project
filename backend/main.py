@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Voice Trigger API",
     description="Automated Voice Recording & Speech-to-Text Pipeline Trigger",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan
 )
 

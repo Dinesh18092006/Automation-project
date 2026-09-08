@@ -71,11 +71,15 @@ let authModal, closeAuthModalBtn, tabSignIn, tabSignUp, authForm, authModalAlert
 let configModal, closeConfigModalBtn, configForm, configModalAlert, cfgWebhookUrl, cfgSupabaseUrl, cfgSupabaseKey, resetConfigBtn, saveConfigBtn;
 let historyHeaderToggle, historyBody, toggleHistoryBtn, toggleHistoryIcon, refreshHistoryBtn, historyCountBadge, historyLoading, historyEmpty, historyList;
 let audioFileInput, uploadAudioBtn, audioUploadStatus, audioUploadText;
+let syncMicBtn, syncMicBtnLabel;
 let mediaRecorder = null;
 let recordedAudioChunks = [];
 let currentSessionAudioPath = null;
 let currentSessionAudioDuration = null;
 let recordingStartTime = null;
+let audioCtx = null;
+let analyserNode = null;
+let audioMonitorActive = false;
 
 function cacheElements() {
   apiUrlSelect = document.getElementById("apiUrlSelect");
@@ -152,6 +156,8 @@ function cacheElements() {
 
   audioFileInput = document.getElementById("audioFileInput");
   uploadAudioBtn = document.getElementById("uploadAudioBtn");
+  syncMicBtn = document.getElementById("syncMicBtn");
+  syncMicBtnLabel = document.getElementById("syncMicBtnLabel");
   audioUploadStatus = document.getElementById("audioUploadStatus");
   audioUploadText = document.getElementById("audioUploadText");
 }
@@ -218,17 +224,25 @@ function updateSessionStatusUI(state, triggerActive = false) {
   }
 }
 
-function updateMicPermissionUI(state) {
+function updateMicPermissionUI(state, text = null) {
   if (!micPermissionStatus) return;
-  if (state === "granted") {
-    micPermissionStatus.className = "chip chip-granted";
-    micPermissionStatus.textContent = "Mic: Permission Granted";
+  micPermissionStatus.className = "chip chip-clickable";
+
+  if (state === "active" || state === "streaming") {
+    micPermissionStatus.classList.add("chip-active");
+    micPermissionStatus.textContent = text || "Mic: Active (Listening) 🎙️";
+  } else if (state === "voice") {
+    micPermissionStatus.classList.add("chip-active");
+    micPermissionStatus.textContent = text || "Mic: Voice Detected 🗣️";
+  } else if (state === "granted") {
+    micPermissionStatus.classList.add("chip-granted");
+    micPermissionStatus.textContent = text || "Mic: Synced & Ready ✓";
   } else if (state === "denied") {
-    micPermissionStatus.className = "chip chip-denied";
-    micPermissionStatus.textContent = "Mic: Permission Denied";
+    micPermissionStatus.classList.add("chip-denied");
+    micPermissionStatus.textContent = text || "Mic: Permission Blocked";
   } else {
-    micPermissionStatus.className = "chip chip-neutral";
-    micPermissionStatus.textContent = "Mic: Pending Permission";
+    micPermissionStatus.classList.add("chip-neutral");
+    micPermissionStatus.textContent = text || "Mic: Click to Sync";
   }
 }
 
@@ -278,20 +292,152 @@ function renderTranscript() {
 }
 
 // --------------------------------------------------------------------------
-// Microphone & Speech Recognition Engine
+// Microphone & Speech Recognition Engine (Full Synchronization)
 // --------------------------------------------------------------------------
-async function ensureMicrophonePermission() {
-  if (micPermissionGranted === true && mediaStream) return true;
+function setupAudioLevelMonitor(stream) {
+  if (!stream || audioMonitorActive) return;
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+
+    if (!audioCtx || audioCtx.state === "closed") {
+      audioCtx = new AudioContextClass();
+    } else if (audioCtx.state === "suspended") {
+      audioCtx.resume();
+    }
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 64;
+    source.connect(analyserNode);
+    audioMonitorActive = true;
+
+    const dataArray = new Uint8Array(analyserNode.frequencyBinCount);
+
+    const checkLevel = () => {
+      if (!audioMonitorActive || !analyserNode) return;
+      analyserNode.getByteFrequencyData(dataArray);
+
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+      const avg = sum / dataArray.length;
+
+      if (avg > 12) {
+        if (transcriptBox) {
+          transcriptBox.classList.add("voice-detected");
+        }
+        if (micPermissionStatus) {
+          updateMicPermissionUI("voice", sessionState === "ACTIVE" ? "Mic: Voice Detected 🗣️" : "Mic: Sound Detected 🎙️");
+        }
+      } else {
+        if (transcriptBox && sessionState !== "ACTIVE") {
+          transcriptBox.classList.remove("voice-detected");
+        }
+        if (micPermissionStatus) {
+          if (sessionState === "ACTIVE") {
+            updateMicPermissionUI("active", "Mic: Active (Listening) 🎙️");
+          } else if (micPermissionGranted) {
+            updateMicPermissionUI("granted", "Mic: Synced & Ready ✓");
+          }
+        }
+      }
+
+      requestAnimationFrame(checkLevel);
+    };
+
+    requestAnimationFrame(checkLevel);
+  } catch (e) {
+    console.warn("Audio level monitor warning:", e);
+  }
+}
+
+async function ensureMicrophonePermission(forceFresh = false) {
+  const hasLiveAudio = mediaStream && mediaStream.getAudioTracks().some(t => t.readyState === "live" && t.enabled);
+  if (!forceFresh && micPermissionGranted === true && hasLiveAudio) {
+    return true;
+  }
+
+  // Clean up any stale streams
+  if (mediaStream) {
+    try { mediaStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+    mediaStream = null;
+  }
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
     micPermissionGranted = true;
-    updateMicPermissionUI("granted");
+    updateMicPermissionUI(sessionState === "ACTIVE" ? "active" : "granted", sessionState === "ACTIVE" ? "Mic: Active (Listening) 🎙️" : "Mic: Synced & Ready ✓");
+    setupAudioLevelMonitor(mediaStream);
     return true;
   } catch (err) {
     micPermissionGranted = false;
-    updateMicPermissionUI("denied");
+    updateMicPermissionUI("denied", "Mic: Permission Denied");
     console.warn("Microphone access denied:", err.message);
     return false;
+  }
+}
+
+async function syncMicrophone(interactive = true) {
+  if (syncMicBtnLabel) syncMicBtnLabel.textContent = "Syncing...";
+  updateMicPermissionUI("neutral", "Syncing Mic...");
+
+  const granted = await ensureMicrophonePermission(true);
+  if (granted) {
+    updateMicPermissionUI(sessionState === "ACTIVE" ? "active" : "granted", sessionState === "ACTIVE" ? "Mic: Active (Streaming) 🎙️" : "Mic: Synced & Ready ✓");
+    if (syncMicBtnLabel) {
+      syncMicBtnLabel.textContent = "Synced ✓";
+      setTimeout(() => { if (syncMicBtnLabel) syncMicBtnLabel.textContent = "Sync Mic"; }, 2000);
+    }
+    updateEventTime("Mic Synced");
+
+    if (sessionState === "ACTIVE") {
+      startListening();
+    }
+  } else {
+    updateMicPermissionUI("denied", "Mic: Blocked in Browser");
+    if (syncMicBtnLabel) {
+      syncMicBtnLabel.textContent = "Failed ✕";
+      setTimeout(() => { if (syncMicBtnLabel) syncMicBtnLabel.textContent = "Sync Mic"; }, 2000);
+    }
+    if (interactive) {
+      alert("Microphone permission was not granted. Please click the padlock or mic icon in your browser address bar to allow microphone access, then click 'Sync Mic'.");
+    }
+  }
+}
+
+async function checkInitialMicPermission() {
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const perm = await navigator.permissions.query({ name: "microphone" });
+      if (perm.state === "granted") {
+        micPermissionGranted = true;
+        updateMicPermissionUI("granted", "Mic: Synced & Ready ✓");
+      } else if (perm.state === "denied") {
+        micPermissionGranted = false;
+        updateMicPermissionUI("denied", "Mic: Blocked in Browser");
+      } else {
+        updateMicPermissionUI("neutral", "Mic: Click to Sync");
+      }
+      perm.onchange = () => {
+        if (perm.state === "granted") {
+          ensureMicrophonePermission(true);
+        } else if (perm.state === "denied") {
+          micPermissionGranted = false;
+          updateMicPermissionUI("denied", "Mic: Blocked");
+        }
+      };
+    } catch (_) {
+      updateMicPermissionUI("neutral", "Mic: Click to Sync");
+    }
+  } else {
+    updateMicPermissionUI("neutral", "Mic: Click to Sync");
   }
 }
 
@@ -309,6 +455,7 @@ function initSpeechRecognition() {
 
   rec.onstart = () => {
     isRecognizing = true;
+    updateMicPermissionUI("active", "Mic: Active (Listening) 🎙️");
     renderTranscript();
   };
 
@@ -329,21 +476,28 @@ function initSpeechRecognition() {
   };
 
   rec.onerror = (event) => {
-    console.warn("Speech recognition error:", event.error);
+    console.warn("Speech recognition event:", event.error);
     if (event.error === "not-allowed") {
       micPermissionGranted = false;
-      updateMicPermissionUI("denied");
+      updateMicPermissionUI("denied", "Mic: Blocked in Browser");
     }
   };
 
   rec.onend = () => {
     isRecognizing = false;
-    // Auto-restart if session is still active
+    // Auto-restart with delay if session is still active
     if (sessionState === "ACTIVE" && isMonitoring) {
-      try {
-        rec.start();
-      } catch (_) {}
+      setTimeout(() => {
+        if (sessionState === "ACTIVE" && isMonitoring && !isRecognizing) {
+          try {
+            rec.start();
+          } catch (_) {}
+        }
+      }, 250);
     } else {
+      if (micPermissionGranted) {
+        updateMicPermissionUI("granted", "Mic: Synced & Ready ✓");
+      }
       renderTranscript();
     }
   };
@@ -401,10 +555,12 @@ async function startListening() {
   } catch (recErr) {
     console.warn("MediaRecorder start warning:", recErr);
   }
+
+  updateMicPermissionUI("active", "Mic: Active (Listening) 🎙️");
 }
 
 function stopListening() {
-  if (recognition && isRecognizing) {
+  if (recognition) {
     try {
       recognition.stop();
     } catch (err) {
@@ -420,6 +576,10 @@ function stopListening() {
     } catch (mErr) {
       console.warn("MediaRecorder stop error:", mErr);
     }
+  }
+
+  if (micPermissionGranted) {
+    updateMicPermissionUI("granted", "Mic: Synced & Ready ✓");
   }
 
   renderTranscript();
@@ -1199,6 +1359,9 @@ function toggleMonitoring() {
 async function runTestTrigger(durationSeconds, label) {
   if (!isMonitoring) startMonitoring();
 
+  // Prime microphone immediately in response to user gesture
+  ensureMicrophonePermission().catch((e) => console.warn("Mic prime warning:", e));
+
   const triggerId = `TEST_${Date.now().toString().slice(-4)}`;
   try {
     const res = await fetch(`${currentApiUrl}/trigger/start`, {
@@ -1244,6 +1407,9 @@ let hasAutoTriggeredForUser = false;
 async function autoStartSessionOnLogin(user, durationSeconds = 60) {
   if (!user) return;
   console.log(`[Auto-Trigger] User authenticated: ${user.email}. Automatically initiating timer session (${durationSeconds}s)...`);
+
+  // Prime microphone immediately
+  ensureMicrophonePermission().catch((e) => console.warn("Mic prime warning:", e));
 
   if (!isMonitoring) {
     startMonitoring();
@@ -1560,6 +1726,14 @@ function setupEventListeners() {
       }
     });
   }
+
+  // Microphone Sync Listeners
+  if (syncMicBtn) {
+    syncMicBtn.addEventListener("click", () => syncMicrophone(true));
+  }
+  if (micPermissionStatus) {
+    micPermissionStatus.addEventListener("click", () => syncMicrophone(true));
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1588,6 +1762,9 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // Load Transcript History on startup
   loadTranscriptHistory();
+
+  // Inspect and reflect microphone status immediately on load
+  checkInitialMicPermission();
 
   // AUTOMATIC TRIGGER LIFECYCLE:
   // Connect to backend and start monitoring stream
