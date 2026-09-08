@@ -2,8 +2,20 @@
 // Voice Trigger Automation — Dashboard Application Logic
 // ==========================================================================
 
-// Default API & Polling Configuration
-let currentApiUrl = "http://localhost:8000";
+// Determine backend API URL dynamically based on environment
+function detectDefaultApiUrl() {
+  if (typeof window === "undefined") return "http://localhost:8000";
+  // If page loaded over HTTPS or remote domain, always use current origin to prevent mixed content blocking
+  if (window.location.protocol === "https:" || !["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    return window.location.origin;
+  }
+  if (window.location.port === "8000") {
+    return window.location.origin;
+  }
+  return "http://localhost:8000";
+}
+
+let currentApiUrl = detectDefaultApiUrl();
 const POLL_INTERVAL_MS = 2500;
 const TICK_INTERVAL_MS = 200; // Fast ticker for smooth countdown and expiration
 
@@ -52,7 +64,7 @@ let authBtn, authBtnLabel, signOutBtn, configModalBtn;
 let monitoringBanner, monitoringBannerText, micPermissionStatus, lastEventTime;
 let backendStatusPill, backendStatusLabel, backendEndpointBox;
 let sessionStatusBadge, triggerStatePill, triggerStateLabel;
-let countdownDisplay, noActiveSessionPlaceholder, activeSessionDetails, activeSessionId, activeSessionExpires;
+let countdownDisplay, noActiveSessionPlaceholder, activeSessionDetails, activeSessionId, activeSessionExpires, quickStartTimerBtn;
 let wordCountBadge, copyTranscriptBtn, transcriptBox, transcriptPlaceholder, transcriptFinal, transcriptInterim;
 let test10sBtn, test30sBtn, test1mBtn, testResetBtn;
 let authModal, closeAuthModalBtn, tabSignIn, tabSignUp, authForm, authModalAlert, authEmail, authPassword, authSubmitBtn;
@@ -91,6 +103,7 @@ function cacheElements() {
 
   countdownDisplay = document.getElementById("countdownDisplay");
   noActiveSessionPlaceholder = document.getElementById("noActiveSessionPlaceholder");
+  quickStartTimerBtn = document.getElementById("quickStartTimerBtn");
   activeSessionDetails = document.getElementById("activeSessionDetails");
   activeSessionId = document.getElementById("activeSessionId");
   activeSessionExpires = document.getElementById("activeSessionExpires");
@@ -526,6 +539,17 @@ async function pollBackendStatus() {
       }
     }
   } catch (error) {
+    // If request failed and we are on HTTPS or remote host but currentApiUrl is still localhost, auto-switch to window.location.origin and retry
+    if (window.location.protocol === "https:" && currentApiUrl !== window.location.origin) {
+      console.warn(`[API Fallback] ${currentApiUrl} unreachable over HTTPS (${error.message}). Auto-switching to ${window.location.origin}`);
+      currentApiUrl = window.location.origin;
+      if (apiUrlSelect) apiUrlSelect.value = currentApiUrl;
+      if (backendEndpointBox) backendEndpointBox.textContent = `GET ${currentApiUrl}/trigger/status`;
+      initWebSocket();
+      setTimeout(pollBackendStatus, 500);
+      return;
+    }
+
     updateBackendConnectionUI(false);
     setBannerState("error", `Monitoring Error • Unable to reach backend (${error.name === "AbortError" ? "Timeout" : error.message})`);
     updateEventTime("Offline");
@@ -1398,6 +1422,7 @@ function setupEventListeners() {
   if (test10sBtn) test10sBtn.addEventListener("click", () => runTestTrigger(10, "10s"));
   if (test30sBtn) test30sBtn.addEventListener("click", () => runTestTrigger(30, "30s"));
   if (test1mBtn) test1mBtn.addEventListener("click", () => runTestTrigger(60, "1m"));
+  if (quickStartTimerBtn) quickStartTimerBtn.addEventListener("click", () => runTestTrigger(60, "1m"));
   if (testResetBtn) testResetBtn.addEventListener("click", resetBackendState);
 
   // Modals
@@ -1541,21 +1566,21 @@ function setupEventListeners() {
 // Initialization on Page Load
 // --------------------------------------------------------------------------
 window.addEventListener("DOMContentLoaded", () => {
-  // Auto-detect backend host
-  const hostname = window.location.hostname;
-  if (hostname === "localhost") {
-    currentApiUrl = "http://localhost:8000";
-    if (apiUrlSelect) apiUrlSelect.value = "http://localhost:8000";
-  } else if (hostname === "127.0.0.1") {
-    currentApiUrl = "http://127.0.0.1:8000";
-    if (apiUrlSelect) apiUrlSelect.value = "http://127.0.0.1:8000";
-  } else {
-    currentApiUrl = window.location.origin;
-    if (apiUrlSelect) {
-      if (Array.from(apiUrlSelect.options).some(o => o.value === currentApiUrl)) {
-        apiUrlSelect.value = currentApiUrl;
-      }
+  cacheElements();
+
+  currentApiUrl = detectDefaultApiUrl();
+  if (apiUrlSelect) {
+    let match = Array.from(apiUrlSelect.options).find(o => o.value === currentApiUrl);
+    if (!match) {
+      match = document.createElement("option");
+      match.value = currentApiUrl;
+      match.textContent = `Current Server (${window.location.hostname})`;
+      apiUrlSelect.insertBefore(match, apiUrlSelect.firstChild);
     }
+    apiUrlSelect.value = currentApiUrl;
+  }
+  if (backendEndpointBox) {
+    backendEndpointBox.textContent = `GET ${currentApiUrl}/trigger/status`;
   }
 
   setupEventListeners();

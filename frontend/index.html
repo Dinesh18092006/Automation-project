@@ -44,10 +44,10 @@
           <label for="apiUrlSelect" class="selector-label">Target Backend:</label>
           <div class="url-input-group">
             <select id="apiUrlSelect" class="api-select">
-              <option value="http://localhost:8000" selected>Local (localhost:8000)</option>
+              <option value="https://automation-project-d95s.onrender.com">Cloud (Render)</option>
+              <option value="http://localhost:8000">Local (localhost:8000)</option>
               <option value="http://127.0.0.1:8000">Local (127.0.0.1:8000)</option>
               <option value="https://api.agents.snsihub.ai">SNS Memora (Production)</option>
-              <option value="https://automation-project-d95s.onrender.com">Cloud (Render)</option>
               <option value="custom">Custom URL...</option>
             </select>
             <input type="text" id="customApiUrl" class="custom-url-input hidden"
@@ -171,6 +171,9 @@
           </div>
           <div id="noActiveSessionPlaceholder" class="session-placeholder">
             <span>No active trigger session</span>
+            <button id="quickStartTimerBtn" class="btn btn-ghost btn-xs" type="button" style="margin-top: 8px; font-size: 0.72rem; padding: 4px 10px; border: 1px solid var(--border-color); border-radius: 4px; color: var(--color-cyan); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+              <span>&#9654;</span> Start 1m Session
+            </button>
           </div>
           <div id="activeSessionDetails" class="session-details-box hidden">
             <div class="detail-line">
