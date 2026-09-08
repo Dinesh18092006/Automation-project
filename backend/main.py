@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Voice Trigger API",
     description="Automated Voice Recording & Speech-to-Text Pipeline Trigger",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan
 )
 
@@ -291,7 +291,7 @@ def home(request: Request):
     if "text/html" in accept:
         index_path = os.path.join(FRONTEND_DIR, "index.html")
         if os.path.exists(index_path):
-            return FileResponse(index_path, media_type="text/html")
+            return FileResponse(index_path, media_type="text/html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
     check_and_update_expiry()
     return {
@@ -307,7 +307,7 @@ def home(request: Request):
 def serve_index_html():
     index_path = os.path.join(FRONTEND_DIR, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path, media_type="text/html")
+        return FileResponse(index_path, media_type="text/html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     raise HTTPException(status_code=404, detail="index.html not found")
 
 
@@ -315,7 +315,7 @@ def serve_index_html():
 def serve_style_css():
     css_path = os.path.join(FRONTEND_DIR, "style.css")
     if os.path.exists(css_path):
-        return FileResponse(css_path, media_type="text/css")
+        return FileResponse(css_path, media_type="text/css", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     raise HTTPException(status_code=404, detail="style.css not found")
 
 
@@ -323,7 +323,7 @@ def serve_style_css():
 def serve_app_js():
     js_path = os.path.join(FRONTEND_DIR, "app.js")
     if os.path.exists(js_path):
-        return FileResponse(js_path, media_type="application/javascript")
+        return FileResponse(js_path, media_type="application/javascript", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
     raise HTTPException(status_code=404, detail="app.js not found")
 
 
