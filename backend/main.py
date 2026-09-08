@@ -8,7 +8,8 @@ from typing import Optional, Set, Any, Dict
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Form
+from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -16,6 +17,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
+DEFAULT_SUPABASE_URL = "https://vzxlgygptsdtyiowowfq.supabase.co"
+DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6eGxneWdwdHNkdHlpb3dvd2ZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyNDcyNDQsImV4cCI6MjEwMzgyMzI0NH0.pLgvSOj18ZPbcq6BNSPeQSMMx36HuWrjI_ycyg_J8ec"
 
 # --------------------------------------------------------------------------
 # Logging Setup
@@ -277,8 +282,17 @@ class ChatWebhookProxyRequest(BaseModel):
 # Endpoints
 # --------------------------------------------------------------------------
 @app.get("/")
-def home():
-    """Health check and high-level service status."""
+def home(request: Request):
+    """
+    If requested by browser (Accept: text/html), serve the frontend dashboard.
+    If requested by API clients / tests (Accept: application/json), return service status JSON.
+    """
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        index_path = os.path.join(FRONTEND_DIR, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path, media_type="text/html")
+
     check_and_update_expiry()
     return {
         "status": "online",
@@ -287,6 +301,80 @@ def home():
         "session_status": trigger_state["status"],
         "trigger_id": trigger_state["trigger_id"],
     }
+
+
+@app.get("/index.html")
+def serve_index_html():
+    index_path = os.path.join(FRONTEND_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    raise HTTPException(status_code=404, detail="index.html not found")
+
+
+@app.get("/style.css")
+def serve_style_css():
+    css_path = os.path.join(FRONTEND_DIR, "style.css")
+    if os.path.exists(css_path):
+        return FileResponse(css_path, media_type="text/css")
+    raise HTTPException(status_code=404, detail="style.css not found")
+
+
+@app.get("/app.js")
+def serve_app_js():
+    js_path = os.path.join(FRONTEND_DIR, "app.js")
+    if os.path.exists(js_path):
+        return FileResponse(js_path, media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="app.js not found")
+
+
+@app.get("/env.js")
+def serve_env_js():
+    safe_env = {
+        "AI_WORKFLOW_WEBHOOK_URL": os.getenv("VITE_AI_WORKFLOW_WEBHOOK_URL") or os.getenv("AI_WORKFLOW_WEBHOOK_URL") or "https://api.agents.snsihub.ai/webhook/memora-chat",
+        "AI_WORKFLOW_TEST_WEBHOOK_URL": os.getenv("VITE_AI_WORKFLOW_TEST_WEBHOOK_URL") or os.getenv("AI_WORKFLOW_TEST_WEBHOOK_URL") or "https://api.agents.snsihub.ai/webhook-test/memora-chat",
+        "SUPABASE_URL": os.getenv("VITE_SUPABASE_URL") or os.getenv("SUPABASE_URL") or DEFAULT_SUPABASE_URL,
+        "SUPABASE_ANON_KEY": os.getenv("VITE_SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY,
+    }
+    content = f"window.ENV = {json.dumps(safe_env, indent=2)};"
+    return Response(content=content, media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/config")
+def serve_api_config():
+    return {
+        "AI_WORKFLOW_WEBHOOK_URL": os.getenv("VITE_AI_WORKFLOW_WEBHOOK_URL") or os.getenv("AI_WORKFLOW_WEBHOOK_URL") or "https://api.agents.snsihub.ai/webhook/memora-chat",
+        "AI_WORKFLOW_TEST_WEBHOOK_URL": os.getenv("VITE_AI_WORKFLOW_TEST_WEBHOOK_URL") or os.getenv("AI_WORKFLOW_TEST_WEBHOOK_URL") or "https://api.agents.snsihub.ai/webhook-test/memora-chat",
+        "SUPABASE_URL": os.getenv("VITE_SUPABASE_URL") or os.getenv("SUPABASE_URL") or DEFAULT_SUPABASE_URL,
+        "SUPABASE_ANON_KEY": os.getenv("VITE_SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY,
+    }
+
+
+@app.post("/api/workbench/audio-webhook")
+async def audio_webhook_proxy(
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    session_id: Optional[str] = Form(None),
+    audio_file_path: Optional[str] = Form(None)
+):
+    target_url = request.headers.get("x-target-webhook-url") or os.getenv("AI_WORKFLOW_WEBHOOK_URL") or "https://api.agents.snsihub.ai/webhook/memora-chat"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = {}
+            data = {}
+            if file:
+                content = await file.read()
+                files["file"] = (file.filename, content, file.content_type)
+            if session_id:
+                data["session_id"] = session_id
+            if audio_file_path:
+                data["audio_file_path"] = audio_file_path
+            resp = await client.post(target_url, data=data, files=files if files else None)
+            return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type", "application/json"))
+    except Exception as e:
+        logger.warning(f"Audio webhook forward warning: {e}")
+        return JSONResponse({"status": "proxy_error", "detail": str(e)}, status_code=502)
+
 
 
 @app.get("/health")
@@ -559,8 +647,8 @@ async def receive_transcript(data: TranscriptRequest):
     # --------------------------------------------------------------------------
     # Persist to Supabase Database (public.speech_transcripts & public.voice_transcripts)
     # --------------------------------------------------------------------------
-    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or "https://vzxlgygptsdtyiowowfq.supabase.co").rstrip("/")
-    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or "sb_publishable_uhpy1s_w6kfj9M7e-J8OQQ_ss_yIZaT")
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
     saved_to_supabase = False
     lang_code = getattr(data, "language_code", None) or "en-IN"
 
@@ -636,8 +724,8 @@ async def _async_insert_supabase_transcript(
     audio_duration_seconds: Optional[float] = None
 ):
     """Non-blocking asynchronous helper to save to Supabase speech_transcripts table."""
-    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or "https://vzxlgygptsdtyiowowfq.supabase.co").rstrip("/")
-    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or "sb_publishable_uhpy1s_w6kfj9M7e-J8OQQ_ss_yIZaT")
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
     if not supabase_url or not supabase_key:
         logger.warning("[SUPABASE] Skipping save: missing URL or Anon Key")
         return False
@@ -706,8 +794,8 @@ async def get_transcripts_history(limit: int = 20):
     Fetches the last N rows from public.speech_transcripts (ordered by created_at DESC).
     Can also fall back to public.voice_transcripts if speech_transcripts is empty or not yet created.
     """
-    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or "https://vzxlgygptsdtyiowowfq.supabase.co").rstrip("/")
-    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or "sb_publishable_uhpy1s_w6kfj9M7e-J8OQQ_ss_yIZaT")
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
     if not supabase_url or not supabase_key:
         return {"transcripts": [], "source": "none"}
 
@@ -877,3 +965,8 @@ async def websocket_endpoint(websocket: WebSocket):
         active_websockets.discard(websocket)
     except Exception:
         active_websockets.discard(websocket)
+
+
+@app.websocket("/trigger/ws")
+async def trigger_websocket_alias(websocket: WebSocket):
+    await websocket_endpoint(websocket)
