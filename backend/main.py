@@ -4,7 +4,7 @@ import json
 import time
 import logging
 import asyncio
-from typing import Optional, Set, Any, Dict
+from typing import Optional, Set, Any
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
