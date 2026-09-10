@@ -88,23 +88,37 @@ USING (true);
 
 GRANT ALL ON TABLE public.voice_transcripts TO anon, authenticated;
 
--- ============================================================================
+-- Enable pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- 9. SNS Workbench Speech Transcripts Schema (speech_transcripts)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS public.speech_transcripts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id TEXT NOT NULL,
     transcript TEXT NOT NULL,
-    language_code TEXT DEFAULT 'en',
+    language_code TEXT DEFAULT 'en-IN',
     ai_response TEXT,
+    audio_file_path TEXT,
+    audio_duration_seconds INTEGER,
+    embedding VECTOR(768),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Ensure embedding column exists if table was already created
+ALTER TABLE public.speech_transcripts 
+ADD COLUMN IF NOT EXISTS embedding VECTOR(768);
 
 CREATE INDEX IF NOT EXISTS idx_speech_transcripts_session_id 
 ON public.speech_transcripts(session_id);
 
 CREATE INDEX IF NOT EXISTS idx_speech_transcripts_created_at 
 ON public.speech_transcripts(created_at DESC);
+
+-- HNSW Vector Index for ultra-fast semantic similarity search
+CREATE INDEX IF NOT EXISTS idx_speech_transcripts_embedding 
+ON public.speech_transcripts 
+USING hnsw (embedding vector_cosine_ops);
 
 ALTER TABLE public.speech_transcripts ENABLE ROW LEVEL SECURITY;
 
@@ -122,6 +136,53 @@ FOR SELECT
 TO anon, authenticated
 USING (true);
 
+DROP POLICY IF EXISTS "Allow update speech_transcripts" ON public.speech_transcripts;
+CREATE POLICY "Allow update speech_transcripts"
+ON public.speech_transcripts
+FOR UPDATE
+TO anon, authenticated
+USING (true)
+WITH CHECK (true);
+
 GRANT ALL ON TABLE public.speech_transcripts TO anon, authenticated;
+
+-- Helper Function for Semantic Similarity Search
+CREATE OR REPLACE FUNCTION public.match_speech_transcripts(
+    query_embedding vector(768),
+    match_threshold float DEFAULT 0.2,
+    match_count int DEFAULT 10
+)
+RETURNS TABLE (
+    id uuid,
+    session_id text,
+    transcript text,
+    language_code text,
+    created_at timestamptz,
+    audio_file_path text,
+    audio_duration_seconds numeric,
+    similarity float
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $func$
+BEGIN
+    RETURN QUERY
+    SELECT
+        st.id,
+        st.session_id,
+        st.transcript,
+        st.language_code,
+        st.created_at,
+        st.audio_file_path,
+        st.audio_duration_seconds,
+        1 - (st.embedding <=> query_embedding) AS similarity
+    FROM public.speech_transcripts st
+    WHERE st.embedding IS NOT NULL
+      AND 1 - (st.embedding <=> query_embedding) > match_threshold
+    ORDER BY st.embedding <=> query_embedding
+    LIMIT match_count;
+END $func$;
+
+GRANT EXECUTE ON FUNCTION public.match_speech_transcripts(vector(768), float, int) TO anon, authenticated;
 
 

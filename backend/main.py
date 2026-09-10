@@ -18,9 +18,32 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+def load_env():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    for env_path in [
+        os.path.join(cur_dir, ".env"),
+        os.path.join(cur_dir, "..", ".env"),
+        os.path.join(cur_dir, "..", "frontend", ".env")
+    ]:
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip("'\"")
+                        if k not in os.environ:
+                            os.environ[k] = v
+
+load_env()
+
 FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
-DEFAULT_SUPABASE_URL = "https://vzxlgygptsdtyiowowfq.supabase.co"
-DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6eGxneWdwdHNkdHlpb3dvd2ZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyNDcyNDQsImV4cCI6MjEwMzgyMzI0NH0.pLgvSOj18ZPbcq6BNSPeQSMMx36HuWrjI_ycyg_J8ec"
+DEFAULT_SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vzxlgygptsdtyiowowfq.supabase.co")
+DEFAULT_SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6eGxneWdwdHNkdHlpb3dvd2ZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyNDcyNDQsImV4cCI6MjEwMzgyMzI0NH0.pLgvSOj18ZPbcq6BNSPeQSMMx36HuWrjI_ycyg_J8ec")
+DEFAULT_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
+DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "768"))
+DEFAULT_GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "models/gemini-3.1-flash-lite")
 
 # --------------------------------------------------------------------------
 # Logging Setup
@@ -55,13 +78,101 @@ async def scheduled_trigger_job(trigger_id: str, duration_minutes: float):
         logger.error(f"[SCHEDULER] Error firing scheduled job '{trigger_id}': {e}")
 
 
+async def generate_gemini_embedding(text: str) -> Optional[list[float]]:
+    """Generate 768-dim vector embedding using Google Gemini API."""
+    if not text or not text.strip():
+        return None
+    api_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
+    model = (os.getenv("GEMINI_EMBEDDING_MODEL") or DEFAULT_GEMINI_MODEL).replace("models/", "")
+    dim = int(os.getenv("EMBEDDING_DIMENSION") or DEFAULT_EMBEDDING_DIM)
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent?key={api_key}"
+    payload = {
+        "output_dimensionality": dim,
+        "content": {
+            "parts": [{"text": text.strip()}]
+        }
+    }
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("embedding", {}).get("values")
+            else:
+                logger.error(f"[GEMINI] Embedding error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logger.error(f"[GEMINI] Embedding request failed: {e}")
+    return None
+
+
+async def auto_embed_unembedded_transcripts_job():
+    """Background task to detect and embed any Supabase transcripts missing embeddings."""
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
+    gemini_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
+    if not supabase_url or not supabase_key or not gemini_key:
+        return
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            query_url = f"{supabase_url}/rest/v1/speech_transcripts?embedding=is.null&transcript=not.is.null&select=id,session_id,transcript&limit=5&order=created_at.desc"
+            resp = await client.get(query_url, headers=headers)
+            if resp.status_code != 200:
+                return
+            rows = resp.json()
+            if not rows or not isinstance(rows, list):
+                return
+
+            for row in rows:
+                transcript_text = (row.get("transcript") or "").strip()
+                if not transcript_text:
+                    continue
+                row_id = row.get("id")
+                vector = await generate_gemini_embedding(transcript_text)
+                if vector:
+                    patch_headers = {**headers, "Prefer": "return=minimal"}
+                    patch_url = f"{supabase_url}/rest/v1/speech_transcripts?id=eq.{row_id}"
+                    patch_resp = await client.patch(patch_url, headers=patch_headers, json={"embedding": vector})
+                    if patch_resp.status_code in (200, 204):
+                        logger.info(f"[AUTO-EMBED] Stored {len(vector)}-dim Gemini embedding for row {row_id}")
+    except Exception as e:
+        logger.debug(f"[AUTO-EMBED] Scan error: {e}")
+
+
+async def background_auto_embed_loop():
+    """Continuous background loop checking for transcripts needing embedding every 15s."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await auto_embed_unembedded_transcripts_job()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.debug(f"[AUTO-EMBED LOOP] Error: {e}")
+        try:
+            await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            break
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifecycle manager to start and stop APScheduler with FastAPI."""
+    """Lifecycle manager to start and stop APScheduler and auto-embed background task."""
     if not scheduler.running:
         scheduler.start()
         logger.info(f"APScheduler initialized with SQLite job store at {DB_PATH}")
+    embed_task = asyncio.create_task(background_auto_embed_loop())
     yield
+    embed_task.cancel()
     if scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("APScheduler stopped.")
@@ -672,6 +783,14 @@ async def receive_transcript(data: TranscriptRequest):
             if data.audio_duration_seconds is not None:
                 st_payload["audio_duration_seconds"] = data.audio_duration_seconds
 
+            # Generate Gemini Vector Embedding
+            try:
+                emb_vector = await generate_gemini_embedding(data.transcript)
+                if emb_vector:
+                    st_payload["embedding"] = emb_vector
+            except Exception as emb_e:
+                logger.warning(f"[GEMINI] Embedding generation warning: {emb_e}")
+
             # Fallback/Legacy: public.voice_transcripts
             vt_payload = {
                 "trigger_id": data.trigger_id,
@@ -684,7 +803,14 @@ async def receive_transcript(data: TranscriptRequest):
                 resp_st = await http_client.post(f"{supabase_url}/rest/v1/speech_transcripts", headers=headers, json=st_payload)
                 if resp_st.status_code in (200, 201):
                     saved_to_supabase = True
-                    logger.info(f"[SUPABASE] Persisted transcript for '{data.trigger_id}' to speech_transcripts table")
+                    logger.info(f"[SUPABASE] Persisted transcript for '{data.trigger_id}' with embedding to speech_transcripts")
+                elif resp_st.status_code not in (200, 201) and "embedding" in st_payload:
+                    # Retry without embedding if column has not yet been added in Supabase
+                    st_fallback = {k: v for k, v in st_payload.items() if k != "embedding"}
+                    retry_resp = await http_client.post(f"{supabase_url}/rest/v1/speech_transcripts", headers=headers, json=st_fallback)
+                    if retry_resp.status_code in (200, 201):
+                        saved_to_supabase = True
+                        logger.info(f"[SUPABASE] Persisted transcript without embedding (run add_vector_embeddings.sql to enable)")
                 else:
                     logger.info(f"[SUPABASE] speech_transcripts table insert status: {resp_st.status_code}")
                 
@@ -836,6 +962,379 @@ async def get_transcripts_history(limit: int = 20):
         logger.error(f"[SUPABASE HISTORY] Error reading transcripts: {e}")
 
     return {"transcripts": [], "source": "error"}
+
+
+@app.get("/api/transcripts/by-session/{session_id}")
+async def get_transcripts_by_session(session_id: str, limit: int = 50):
+    """
+    Retrieve all transcripts from public.speech_transcripts that match a given session_id.
+    Falls back to public.voice_transcripts (trigger_id column) if none found.
+
+    Args:
+        session_id: The session/trigger ID to filter by.
+        limit: Maximum number of rows to return (default 50).
+
+    Returns:
+        { "transcripts": [...], "session_id": "...", "count": N, "source": "..." }
+    """
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
+
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Supabase configuration is missing.")
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            # 1. Query public.speech_transcripts filtered by session_id
+            st_url = (
+                f"{supabase_url}/rest/v1/speech_transcripts"
+                f"?session_id=eq.{session_id}"
+                f"&select=*"
+                f"&order=created_at.desc"
+                f"&limit={limit}"
+            )
+            resp = await client.get(st_url, headers=headers)
+
+            if resp.status_code == 200:
+                rows = resp.json()
+                if rows and len(rows) > 0:
+                    logger.info(f"[SUPABASE] Found {len(rows)} transcript(s) for session_id='{session_id}' in speech_transcripts")
+                    return {
+                        "transcripts": rows,
+                        "session_id": session_id,
+                        "count": len(rows),
+                        "source": "speech_transcripts"
+                    }
+            else:
+                logger.warning(f"[SUPABASE] speech_transcripts query returned status {resp.status_code}: {resp.text}")
+
+            # 2. Fallback: query public.voice_transcripts by trigger_id
+            vt_url = (
+                f"{supabase_url}/rest/v1/voice_transcripts"
+                f"?trigger_id=eq.{session_id}"
+                f"&select=*"
+                f"&order=created_at.desc"
+                f"&limit={limit}"
+            )
+            vt_resp = await client.get(vt_url, headers=headers)
+
+            if vt_resp.status_code == 200:
+                vt_rows = vt_resp.json()
+                if vt_rows and len(vt_rows) > 0:
+                    normalized = [
+                        {
+                            "id": r.get("id"),
+                            "session_id": r.get("trigger_id") or r.get("session_id"),
+                            "transcript": r.get("transcript"),
+                            "language_code": r.get("language_code", "en-IN"),
+                            "created_at": r.get("created_at")
+                        }
+                        for r in vt_rows
+                    ]
+                    logger.info(f"[SUPABASE] Found {len(normalized)} transcript(s) for trigger_id='{session_id}' in voice_transcripts (fallback)")
+                    return {
+                        "transcripts": normalized,
+                        "session_id": session_id,
+                        "count": len(normalized),
+                        "source": "voice_transcripts"
+                    }
+
+            # Nothing found in either table
+            return {
+                "transcripts": [],
+                "session_id": session_id,
+                "count": 0,
+                "source": "none"
+            }
+
+    except Exception as e:
+        logger.error(f"[SUPABASE BY-SESSION] Error retrieving transcripts for session_id='{session_id}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch transcripts: {e}")
+
+
+class SemanticSearchRequest(BaseModel):
+    query: str
+    limit: Optional[int] = 10
+    threshold: Optional[float] = 0.2
+
+
+@app.post("/api/transcripts/search")
+async def semantic_search_transcripts_endpoint(data: SemanticSearchRequest):
+    """
+    Search speech_transcripts semantically by text query using Gemini embeddings
+    and Supabase match_speech_transcripts RPC.
+    """
+    if not data.query or not data.query.strip():
+        raise HTTPException(status_code=400, detail="Query text cannot be empty")
+
+    vector = await generate_gemini_embedding(data.query)
+    if not vector:
+        raise HTTPException(status_code=502, detail="Failed to generate query embedding via Gemini")
+
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Supabase configuration missing")
+
+    import httpx
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "query_embedding": vector,
+        "match_threshold": data.threshold or 0.2,
+        "match_count": data.limit or 10
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{supabase_url}/rest/v1/rpc/match_speech_transcripts", headers=headers, json=payload)
+            if resp.status_code == 200:
+                results = resp.json()
+                return {"matches": results, "query": data.query, "count": len(results)}
+            else:
+                logger.error(f"[SEMANTIC SEARCH] RPC error {resp.status_code}: {resp.text}")
+                raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[SEMANTIC SEARCH] Exception: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def generate_gemini_rag_response(query: str, context_chunks: list[dict]) -> str:
+    """
+    Generate an answer using Google Gemini 3.1 Flash Lite based on retrieved transcripts context.
+    """
+    api_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
+    model = (os.getenv("GEMINI_GENERATION_MODEL") or DEFAULT_GEMINI_GENERATION_MODEL).replace("models/", "")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+    context_lines = []
+    for idx, chunk in enumerate(context_chunks, 1):
+        sess = chunk.get("session_id") or "UNKNOWN"
+        created = chunk.get("created_at") or ""
+        sim = chunk.get("similarity")
+        sim_str = f" (relevance: {round(sim * 100, 1)}%)" if sim is not None else ""
+        transcript = chunk.get("transcript") or ""
+        context_lines.append(f"[Source {idx} | Session: {sess}{sim_str} | Time: {created}]:\n\"{transcript}\"")
+
+    context_str = "\n\n".join(context_lines) if context_lines else "(No relevant speech transcripts found.)"
+
+    system_instruction = (
+        "You are an intelligent AI assistant answering questions about recorded voice notes and speech transcripts.\n"
+        "Analyze the provided transcript context to provide accurate, factual, and helpful responses.\n"
+        "- If the answer is found in the transcripts, quote or summarize it and reference the session ID.\n"
+        "- If the information is partial or ambiguous, explain what is known from the transcripts.\n"
+        "- If the transcripts don't contain enough information to answer, state clearly that the recorded voice notes do not contain this information."
+    )
+
+    prompt = (
+        f"{system_instruction}\n\n"
+        f"--- CONTEXT TRANSCRIPTS ---\n"
+        f"{context_str}\n\n"
+        f"--- USER QUESTION ---\n"
+        f"{query}\n\n"
+        f"--- ANSWER ---"
+    )
+
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 800
+        }
+    }
+
+    primary_model = (os.getenv("GEMINI_GENERATION_MODEL") or DEFAULT_GEMINI_GENERATION_MODEL).replace("models/", "")
+    models_to_try = [primary_model, "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]
+    seen = set()
+    models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
+
+    last_error = "Unknown error"
+    for m in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+        for attempt in range(2):
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=25.0) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates and "content" in candidates[0]:
+                            parts = candidates[0]["content"].get("parts", [])
+                            if parts and "text" in parts[0]:
+                                return parts[0]["text"].strip()
+                        return "No response text generated by Gemini."
+                    elif resp.status_code == 503:
+                        await asyncio.sleep(1.5)
+                        continue
+                    else:
+                        last_error = f"Gemini API {resp.status_code}: {resp.text}"
+            except Exception as e:
+                last_error = str(e)
+                await asyncio.sleep(1.0)
+    return f"AI generation error: {last_error}"
+
+
+class RAGQueryRequest(BaseModel):
+    query: str
+    top_k: Optional[int] = 5
+    threshold: Optional[float] = 0.15
+    session_id: Optional[str] = None
+
+
+@app.post("/api/rag/query")
+async def rag_query_endpoint(data: RAGQueryRequest):
+    """
+    RAG Endpoint using Gemini 3.1 Flash Lite:
+    1. Embeds user query using Gemini (gemini-embedding-001).
+    2. Performs vector cosine similarity retrieval in Supabase pgvector.
+    3. Synthesizes an answer using Gemini 3.1 Flash Lite (gemini-3.1-flash-lite).
+    """
+    if not data.query or not data.query.strip():
+        raise HTTPException(status_code=400, detail="Query text cannot be empty")
+
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Supabase configuration missing")
+
+    import httpx
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json"
+    }
+
+    retrieved_chunks = []
+    vector = await generate_gemini_embedding(data.query)
+
+    # 1. Attempt Vector Similarity Search via RPC match_speech_transcripts
+    if vector:
+        try:
+            rpc_payload = {
+                "query_embedding": vector,
+                "match_threshold": data.threshold or 0.15,
+                "match_count": data.top_k or 5
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                rpc_resp = await client.post(
+                    f"{supabase_url}/rest/v1/rpc/match_speech_transcripts",
+                    headers=headers,
+                    json=rpc_payload
+                )
+                if rpc_resp.status_code == 200:
+                    retrieved_chunks = rpc_resp.json()
+        except Exception as e:
+            logger.warning(f"[RAG] Vector RPC query failed, falling back to recent rows: {e}")
+
+    # 2. Graceful Fallback: If vector matches are empty, retrieve recent transcripts
+    if not retrieved_chunks:
+        try:
+            params = {
+                "select": "id,session_id,transcript,language_code,created_at,audio_file_path,audio_duration_seconds",
+                "order": "created_at.desc",
+                "limit": str(data.top_k or 5)
+            }
+            if data.session_id:
+                params["session_id"] = f"eq.{data.session_id}"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                fb_resp = await client.get(
+                    f"{supabase_url}/rest/v1/speech_transcripts",
+                    headers=headers,
+                    params=params
+                )
+                if fb_resp.status_code == 200:
+                    retrieved_chunks = fb_resp.json()
+        except Exception as fb_err:
+            logger.error(f"[RAG] Fallback retrieval error: {fb_err}")
+
+    # 3. Generate Answer with Gemini 3.1 Flash Lite
+    answer = await generate_gemini_rag_response(data.query, retrieved_chunks)
+
+    generation_model = os.getenv("GEMINI_GENERATION_MODEL") or DEFAULT_GEMINI_GENERATION_MODEL
+
+    return {
+        "query": data.query,
+        "answer": answer,
+        "sources": retrieved_chunks,
+        "source_count": len(retrieved_chunks),
+        "embedding_model": os.getenv("GEMINI_EMBEDDING_MODEL") or DEFAULT_GEMINI_MODEL,
+        "generation_model": generation_model
+    }
+
+
+@app.post("/api/webhooks/supabase/embed-transcript")
+async def supabase_webhook_embed_transcript(request: Request):
+    """
+    Supabase Database Webhook handler:
+    Can be configured in Supabase (Database -> Webhooks) on speech_transcripts for INSERT/UPDATE.
+    Automatically generates Gemini embedding and stores in the row.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    record = body.get("record") or {}
+    row_id = record.get("id")
+    transcript_text = (record.get("transcript") or "").strip()
+
+    if not row_id or not transcript_text:
+        return {"status": "skipped", "reason": "No row_id or transcript present"}
+
+    # Avoid infinite loop if embedding already updated
+    if record.get("embedding"):
+        return {"status": "skipped", "reason": "Embedding already exists"}
+
+    embedding = await generate_gemini_embedding(transcript_text)
+    if not embedding:
+        return {"status": "error", "detail": "Failed to generate Gemini embedding"}
+
+    supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
+    supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
+    if not supabase_url or not supabase_key:
+        raise HTTPException(status_code=503, detail="Supabase configuration missing")
+
+    import httpx
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            patch_res = await client.patch(
+                f"{supabase_url}/rest/v1/speech_transcripts?id=eq.{row_id}",
+                headers=headers,
+                json={"embedding": embedding}
+            )
+            if patch_res.status_code in (200, 204):
+                logger.info(f"[WEBHOOK] Saved Gemini embedding for row {row_id}")
+                return {"status": "success", "row_id": row_id, "dimension": len(embedding)}
+            else:
+                logger.error(f"[WEBHOOK] Failed to update row {row_id}: {patch_res.status_code} {patch_res.text}")
+                return {"status": "error", "code": patch_res.status_code, "detail": patch_res.text}
+    except Exception as e:
+        logger.error(f"[WEBHOOK] Error patching row {row_id}: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 @app.post("/trigger/reset")

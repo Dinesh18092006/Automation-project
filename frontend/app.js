@@ -1766,7 +1766,94 @@ window.addEventListener("DOMContentLoaded", () => {
   // Inspect and reflect microphone status immediately on load
   checkInitialMicPermission();
 
+  // Setup RAG Voice Intelligence
+  cacheRagElements();
+
   // AUTOMATIC TRIGGER LIFECYCLE:
   // Connect to backend and start monitoring stream
   startMonitoring();
 });
+
+// --------------------------------------------------------------------------
+// RAG Voice Intelligence Chat with Gemini 3.1 Flash Lite
+// --------------------------------------------------------------------------
+let ragQueryInput, ragSubmitBtn, ragLoading, ragResultBox, ragAnswerText, ragSourcesList, ragModelBadge;
+
+function cacheRagElements() {
+  ragQueryInput = document.getElementById("ragQueryInput");
+  ragSubmitBtn = document.getElementById("ragSubmitBtn");
+  ragLoading = document.getElementById("ragLoading");
+  ragResultBox = document.getElementById("ragResultBox");
+  ragAnswerText = document.getElementById("ragAnswerText");
+  ragSourcesList = document.getElementById("ragSourcesList");
+  ragModelBadge = document.getElementById("ragModelBadge");
+
+  if (ragSubmitBtn && ragQueryInput) {
+    ragSubmitBtn.addEventListener("click", performRagQuery);
+    ragQueryInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        performRagQuery();
+      }
+    });
+  }
+}
+
+async function performRagQuery() {
+  if (!ragQueryInput) return;
+  const q = ragQueryInput.value.trim();
+  if (!q) return;
+
+  if (ragLoading) ragLoading.classList.remove("hidden");
+  if (ragResultBox) ragResultBox.classList.add("hidden");
+  if (ragSubmitBtn) ragSubmitBtn.disabled = true;
+
+  try {
+    const res = await fetch(`${currentApiUrl}/api/rag/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: q, top_k: 5 })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Server returned ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json();
+    if (ragAnswerText) ragAnswerText.textContent = data.answer || "No response produced.";
+    if (ragModelBadge) ragModelBadge.textContent = data.generation_model || "gemini-3.1-flash-lite";
+
+    if (ragSourcesList) {
+      ragSourcesList.innerHTML = "";
+      if (Array.isArray(data.sources) && data.sources.length > 0) {
+        data.sources.forEach((s) => {
+          const item = document.createElement("div");
+          item.style.fontSize = "0.8rem";
+          item.style.padding = "6px 10px";
+          item.style.background = "rgba(15,23,42,0.5)";
+          item.style.borderRadius = "6px";
+          item.style.color = "#cbd5e1";
+          item.style.borderLeft = "3px solid #a855f7";
+
+          const sim = s.similarity ? ` (Relevance: ${Math.round(s.similarity * 100)}%)` : "";
+          const sess = s.session_id || "Session";
+          const snippet = (s.transcript || "").substring(0, 100) + "...";
+          item.innerHTML = `<strong>${sess}${sim}:</strong> <em>"${snippet}"</em>`;
+          ragSourcesList.appendChild(item);
+        });
+      } else {
+        ragSourcesList.innerHTML = `<span style="font-size: 0.8rem; color: #64748b;">No direct sources matched.</span>`;
+      }
+    }
+
+    if (ragResultBox) ragResultBox.classList.remove("hidden");
+  } catch (err) {
+    if (ragAnswerText) ragAnswerText.textContent = `Error: ${err.message}`;
+    if (ragResultBox) ragResultBox.classList.remove("hidden");
+  } finally {
+    if (ragLoading) ragLoading.classList.add("hidden");
+    if (ragSubmitBtn) ragSubmitBtn.disabled = false;
+  }
+}
+

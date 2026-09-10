@@ -236,6 +236,19 @@ def test_aws_sns_integration(client):
     client.post("/trigger/reset")
 
 
+def test_rag_query_endpoint(client):
+    """Verify RAG endpoint with Gemini 3.1 Flash Lite."""
+    print("\n--- Running RAG Query Endpoint Test ---")
+    res = client.post("/api/rag/query", json={"query": "What was discussed about Render?", "top_k": 3})
+    assert res.status_code == 200
+    data = res.json()
+    assert "answer" in data
+    assert "sources" in data
+    assert data["generation_model"] == "models/gemini-3.1-flash-lite"
+    assert len(data["answer"]) > 0
+    print(f"[PASS] POST /api/rag/query verified! Answer snippet: {data['answer'][:80]}...")
+
+
 if __name__ == "__main__":
     with TestClient(app) as test_client:
         test_full_lifecycle(test_client)
@@ -244,3 +257,4 @@ if __name__ == "__main__":
         test_manual_test_fire_and_scheduler(test_client)
         test_chat_webhook_proxy(test_client)
         test_aws_sns_integration(test_client)
+        test_rag_query_endpoint(test_client)
