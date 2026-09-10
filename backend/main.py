@@ -32,15 +32,23 @@ def load_env():
                     if line and not line.startswith("#") and "=" in line:
                         k, v = line.split("=", 1)
                         k, v = k.strip(), v.strip().strip("'\"")
-                        if k not in os.environ:
+                        if not os.environ.get(k):
                             os.environ[k] = v
 
 load_env()
 
+def get_gemini_api_key() -> str:
+    """Retrieve Gemini API key from environment, re-reading .env if currently unset."""
+    key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not key:
+        load_env()
+        key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    return key
+
 FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend"))
 DEFAULT_SUPABASE_URL = os.getenv("SUPABASE_URL", "https://vzxlgygptsdtyiowowfq.supabase.co")
 DEFAULT_SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6eGxneWdwdHNkdHlpb3dvd2ZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyNDcyNDQsImV4cCI6MjEwMzgyMzI0NH0.pLgvSOj18ZPbcq6BNSPeQSMMx36HuWrjI_ycyg_J8ec")
-DEFAULT_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+DEFAULT_GEMINI_KEY = get_gemini_api_key()
 DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
 DEFAULT_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "768"))
 DEFAULT_GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL", "models/gemini-3.1-flash-lite")
@@ -82,7 +90,10 @@ async def generate_gemini_embedding(text: str) -> Optional[list[float]]:
     """Generate 768-dim vector embedding using Google Gemini API."""
     if not text or not text.strip():
         return None
-    api_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
+    api_key = get_gemini_api_key()
+    if not api_key:
+        logger.warning("[GEMINI] Embedding skipped: GEMINI_API_KEY is not configured.")
+        return None
     model = (os.getenv("GEMINI_EMBEDDING_MODEL") or DEFAULT_GEMINI_MODEL).replace("models/", "")
     dim = int(os.getenv("EMBEDDING_DIMENSION") or DEFAULT_EMBEDDING_DIM)
 
@@ -111,7 +122,7 @@ async def auto_embed_unembedded_transcripts_job():
     """Background task to detect and embed any Supabase transcripts missing embeddings."""
     supabase_url = (os.getenv("SUPABASE_URL") or os.getenv("VITE_SUPABASE_URL") or DEFAULT_SUPABASE_URL).rstrip("/")
     supabase_key = (os.getenv("SUPABASE_ANON_KEY") or os.getenv("VITE_SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY)
-    gemini_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
+    gemini_key = get_gemini_api_key()
     if not supabase_url or not supabase_key or not gemini_key:
         return
 
@@ -502,7 +513,9 @@ def health_check():
         "active_session": trigger_state["active"],
         "session_status": trigger_state["status"],
         "trigger_id": trigger_state["trigger_id"],
-        "scheduler_running": scheduler.running if scheduler else False
+        "scheduler_running": scheduler.running if scheduler else False,
+        "gemini_configured": bool(get_gemini_api_key()),
+        "supabase_configured": bool((os.getenv("SUPABASE_URL") or DEFAULT_SUPABASE_URL) and (os.getenv("SUPABASE_ANON_KEY") or DEFAULT_SUPABASE_KEY))
     }
 
 
@@ -1115,9 +1128,12 @@ async def generate_gemini_rag_response(query: str, context_chunks: list[dict]) -
     """
     Generate an answer using Google Gemini 3.1 Flash Lite based on retrieved transcripts context.
     """
-    api_key = os.getenv("GEMINI_API_KEY") or DEFAULT_GEMINI_KEY
-    model = (os.getenv("GEMINI_GENERATION_MODEL") or DEFAULT_GEMINI_GENERATION_MODEL).replace("models/", "")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return (
+            "AI generation error: GEMINI_API_KEY is not configured or is empty. "
+            "Please add GEMINI_API_KEY to backend/.env (for local dev) or in your deployment's environment variables (e.g. Render dashboard), and restart the backend server."
+        )
 
     context_lines = []
     for idx, chunk in enumerate(context_chunks, 1):
@@ -1160,7 +1176,7 @@ async def generate_gemini_rag_response(query: str, context_chunks: list[dict]) -
     }
 
     primary_model = (os.getenv("GEMINI_GENERATION_MODEL") or DEFAULT_GEMINI_GENERATION_MODEL).replace("models/", "")
-    models_to_try = [primary_model, "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]
+    models_to_try = [primary_model, "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-1.5-flash"]
     seen = set()
     models_to_try = [m for m in models_to_try if not (m in seen or seen.add(m))]
 
@@ -1183,6 +1199,9 @@ async def generate_gemini_rag_response(query: str, context_chunks: list[dict]) -
                     elif resp.status_code == 503:
                         await asyncio.sleep(1.5)
                         continue
+                    elif resp.status_code == 403:
+                        last_error = f"Gemini API 403: {resp.text}"
+                        break
                     else:
                         last_error = f"Gemini API {resp.status_code}: {resp.text}"
             except Exception as e:
